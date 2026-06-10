@@ -1,0 +1,9 @@
+apiVersion: v2
+name: modelservice
+description: >
+  vLLM model server deployment for llm-d guides.
+  Translated from guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/
+  and guides/recipes/modelserver/base/single-host/default/.
+type: application
+version: 0.1.0
+appVersion: "v0.19.1"

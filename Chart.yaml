@@ -1,0 +1,49 @@
+apiVersion: v2
+name: precise-prefix-cache-routing
+description: >
+  Umbrella Helm chart for the llm-d precise-prefix-cache-routing guide.
+  Deploys the llm-d Router in Standalone mode (InferencePool + EPP + Envoy sidecar)
+  together with a vLLM model server configured for ZMQ-based KV-cache event streaming.
+type: application
+version: 0.1.0
+appVersion: "v0.7.0"
+
+# Prerequisites (run once per cluster/namespace):
+#   export GAIE_VERSION=v1.5.0
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/v1-manifests.yaml
+#   kubectl create secret generic llm-d-hf-token --from-literal="HF_TOKEN=<token>" -n <namespace>
+#
+# Before first install, resolve the OCI dependency:
+#   helm dependency update
+#
+# IMPORTANT – router chart version:
+#   The guide and all CI workflows install this chart with --version v0
+#   (an OCI channel tag, not semver). Helm dependencies require semver, so
+#   run the following to find the actual chart semver stored inside that tag:
+#     helm show chart oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev --version v0
+#   Then replace the version field below with the returned semver (e.g. 0.1.0).
+#
+# IMPORTANT – model server:
+#   As of llm-d v0.7, there is no official Helm chart for the model server.
+#   The official deployment method is Kustomize (see ../modelserver/gpu/vllm/base/).
+#   The local `modelservice` subchart below is a Helm translation of that
+#   Kustomize overlay, provided for users who prefer a pure-Helm workflow.
+
+dependencies:
+  # llm-d Router in Standalone Mode — deploys InferencePool CRD instance + EPP + Envoy sidecar.
+  # Published at oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev
+  # Source: https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/config/charts/standalone
+  #
+  # Replace the version below with the semver returned by:
+  #   helm show chart oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev --version v0
+  - name: llm-d-router-standalone-dev
+    alias: inferencepool
+    version: "0.1.0"   # <-- verify: helm show chart oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev --version v0
+    repository: "oci://ghcr.io/llm-d/charts"
+
+  # vLLM model server — local Helm subchart.
+  # Translated from guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/
+  # (the official method is Kustomize; this subchart mirrors it for Helm workflows).
+  - name: modelservice
+    version: "0.1.0"
+    repository: "file://charts/modelservice"

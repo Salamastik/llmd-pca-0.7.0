@@ -1,0 +1,189 @@
+---
+# Source: helm template precise-prefix-cache-routing . \
+#           -f values.yaml -f values-override.yaml \
+#           -n llm-d-precise-prefix-cache-routing
+#
+# NOTE: The `inferencepool` section (llm-d-router-standalone-dev OCI chart) requires
+# `helm dependency update` to pull the chart before helm can render it.
+# To regenerate this file with the full InferencePool/EPP output:
+#
+#   helm dependency update
+#   helm template precise-prefix-cache-routing . \
+#     -f values.yaml -f values-override.yaml \
+#     -n llm-d-precise-prefix-cache-routing \
+#     > helm-template-output.yaml
+#
+# The resources below are rendered from the local `modelservice` subchart only.
+# -------------------------------------------------------------------
+
+# Source: precise-prefix-cache-routing/charts/modelservice/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: precise-prefix-cache-routing-modelservice
+  labels:
+    helm.sh/chart: modelservice-0.1.0
+    app.kubernetes.io/name: modelservice
+    app.kubernetes.io/instance: precise-prefix-cache-routing
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: false
+---
+# Source: precise-prefix-cache-routing/charts/modelservice/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: precise-prefix-cache-routing-modelservice
+  labels:
+    helm.sh/chart: modelservice-0.1.0
+    app.kubernetes.io/name: modelservice
+    app.kubernetes.io/instance: precise-prefix-cache-routing
+    app.kubernetes.io/managed-by: Helm
+    llm-d.ai/guide: "precise-prefix-cache-routing"
+    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/accelerator-variant: "gpu"
+    llm-d.ai/accelerator-vendor: "nvidia"
+    llm-d.ai/role: "decode"
+spec:
+  selector:
+    app.kubernetes.io/name: modelservice
+    app.kubernetes.io/instance: precise-prefix-cache-routing
+    llm-d.ai/guide: "precise-prefix-cache-routing"
+    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/accelerator-variant: "gpu"
+    llm-d.ai/accelerator-vendor: "nvidia"
+    llm-d.ai/role: "decode"
+  ports:
+    - name: modelserver
+      port: 8000
+      targetPort: modelserver
+      protocol: TCP
+    - name: kv-events
+      port: 5556
+      targetPort: kv-events
+      protocol: TCP
+---
+# Source: precise-prefix-cache-routing/charts/modelservice/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: precise-prefix-cache-routing-modelservice
+  labels:
+    helm.sh/chart: modelservice-0.1.0
+    app.kubernetes.io/name: modelservice
+    app.kubernetes.io/instance: precise-prefix-cache-routing
+    app.kubernetes.io/managed-by: Helm
+    llm-d.ai/guide: "precise-prefix-cache-routing"
+    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/accelerator-variant: "gpu"
+    llm-d.ai/accelerator-vendor: "nvidia"
+    llm-d.ai/role: "decode"
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: modelservice
+      app.kubernetes.io/instance: precise-prefix-cache-routing
+      llm-d.ai/guide: "precise-prefix-cache-routing"
+      llm-d.ai/model: "Qwen3-32B"
+      llm-d.ai/accelerator-variant: "gpu"
+      llm-d.ai/accelerator-vendor: "nvidia"
+      llm-d.ai/role: "decode"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: modelservice
+        app.kubernetes.io/instance: precise-prefix-cache-routing
+        llm-d.ai/guide: "precise-prefix-cache-routing"
+        llm-d.ai/model: "Qwen3-32B"
+        llm-d.ai/accelerator-variant: "gpu"
+        llm-d.ai/accelerator-vendor: "nvidia"
+        llm-d.ai/role: "decode"
+    spec:
+      serviceAccountName: precise-prefix-cache-routing-modelservice
+      containers:
+        - name: modelserver
+          image: "vllm/vllm-openai:v0.19.1"
+          imagePullPolicy: IfNotPresent
+          command: ["vllm", "serve"]
+          args:
+            - "Qwen/Qwen3-32B"
+            - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
+            - "--tensor-parallel-size=2"
+            - "--block-size=64"
+            - "--gpu-memory-utilization=0.95"
+            - "--kv-events-config"
+            - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen3-32B"}'
+          ports:
+            - name: modelserver
+              containerPort: 8000
+              protocol: TCP
+            - containerPort: 5556
+              name: kv-events
+              protocol: TCP
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-d-hf-token
+                  key: HF_TOKEN
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_PORT
+              value: "8000"
+            - name: KV_EVENTS_ENDPOINT
+              value: "tcp://*:5556"
+            - name: DO_NOT_TRACK
+              value: "1"
+          resources:
+            limits:
+              cpu: "16"
+              memory: "128Gi"
+              nvidia.com/gpu: "2"
+            requests:
+              cpu: "8"
+              memory: "96Gi"
+              nvidia.com/gpu: "2"
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shm
+            - mountPath: /.cache
+              name: torch-compile-cache
+            - mountPath: /.triton
+              name: triton-cache
+            - mountPath: /.config
+              name: vllm-config
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: modelserver
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 20Gi
+        - name: torch-compile-cache
+          emptyDir: {}
+        - name: triton-cache
+          emptyDir: {}
+        - name: vllm-config
+          emptyDir: {}

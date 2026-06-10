@@ -1,0 +1,55 @@
+replicaCount: 1
+
+image:
+  repository: vllm/vllm-openai
+  tag: v0.19.1
+  pullPolicy: IfNotPresent
+
+model:
+  name: "Qwen/Qwen3-32B"
+
+# Additional CLI args appended after the model name in `vllm serve <model> <extraArgs>`
+extraArgs: []
+
+# Environment variables injected into the modelserver container
+env: []
+
+# Extra container ports beyond the default modelserver port 8000
+extraPorts: []
+
+# Labels added to Deployment metadata, pod template metadata, and matchLabels selector
+labels: {}
+
+resources:
+  limits:
+    cpu: "16"
+    memory: "128Gi"
+    nvidia.com/gpu: "2"
+  requests:
+    cpu: "8"
+    memory: "96Gi"
+    nvidia.com/gpu: "2"
+
+volumeMounts: []
+
+volumes: []
+
+probes:
+  startup:
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 120
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+serviceAccount:
+  create: true
+  # If empty, uses the fullname template
+  name: ""

@@ -1,0 +1,229 @@
+# precise-prefix-cache-routing guide overrides.
+#
+# Source: guides/precise-prefix-cache-routing/router/precise-prefix-cache-routing.values.yaml
+#         guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/patch-vllm.yaml
+#
+# Usage:
+#   export GUIDE_NAME="precise-prefix-cache-routing"
+#   export NAMESPACE="llm-d-${GUIDE_NAME}"
+#   helm install ${GUIDE_NAME} . \
+#     -f values.yaml \
+#     -f values-override.yaml \
+#     -n ${NAMESPACE}
+#
+# Prerequisites (run once per cluster):
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/v1-manifests.yaml
+#   kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl create secret generic llm-d-hf-token \
+#     --from-literal="HF_TOKEN=${HF_TOKEN}" \
+#     --namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+# ---------------------------------------------------------------------------
+# inferencepool — precise-prefix-cache-routing EPP configuration
+# ---------------------------------------------------------------------------
+inferencepool:
+  router:
+    # vllm-render sidecar exposes /v1/completions/render on localhost:8000;
+    # the EPP token-producer plugin tokenizes prompts via that HTTP endpoint.
+    tokenizer:
+      enabled: true
+      modelName: Qwen/Qwen3-32B   # must match token-producer modelName below
+      env:
+        - name: HF_HOME
+          value: /tmp/hf/hub
+
+    epp:
+      # Active-active HA: two replicas, each subscribing to every vLLM pod via
+      # pod-discovery so both indexes converge. Scale to 1 with --set inferencepool.router.epp.replicas=1.
+      replicas: 2
+      flags:
+        # The chart auto-adds --ha-enable-leader-election when replicas > 1,
+        # which collapses to active-passive. Forcing =false here keeps active-active.
+        # No-op when replicas=1.
+        ha-enable-leader-election: false
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: llm-d-hf-token
+              key: HF_TOKEN
+
+      pluginsConfigFile: "precise-prefix-cache-routing-plugins.yaml"
+      pluginsCustomConfig:
+        precise-prefix-cache-routing-plugins.yaml: |
+          apiVersion: llm-d.ai/v1alpha1
+          kind: EndpointPickerConfig
+          plugins:
+            - type: token-producer
+              parameters:
+                modelName: Qwen/Qwen3-32B   # must match router.tokenizer.modelName above
+                vllm:
+                  url: "http://localhost:8000"
+            - type: endpoint-notification-source
+            - type: precise-prefix-cache-producer  # precise-prefix-cache-scorer is deprecated
+              parameters:
+                tokenProcessorConfig:
+                  blockSize: 64   # must match vLLM --block-size
+                speculativeIndexing: true
+                indexerConfig:
+                  kvBlockIndexConfig:
+                    enableMetrics: true
+                kvEventsConfig:
+                  topicFilter: "kv@"
+                  concurrency: 8
+                  discoverPods: true
+                  podDiscoveryConfig:
+                    socketPort: 5556
+            - type: prefix-cache-scorer
+              parameters:
+                prefixMatchInfoProducerName: precise-prefix-cache-producer
+            - type: kv-cache-utilization-scorer
+            - type: queue-scorer
+            - type: no-hit-lru-scorer
+              parameters:
+                prefixMatchInfoProducerName: precise-prefix-cache-producer
+          dataLayer:
+            sources:
+              - pluginRef: endpoint-notification-source
+                extractors:
+                  - pluginRef: precise-prefix-cache-producer
+          schedulingProfiles:
+            - name: default
+              plugins:
+                - pluginRef: kv-cache-utilization-scorer
+                  weight: 2.0
+                - pluginRef: queue-scorer
+                  weight: 2.0
+                - pluginRef: prefix-cache-scorer
+                  weight: 3.0
+                - pluginRef: no-hit-lru-scorer
+                  weight: 2.0
+
+    extraServicePorts:
+      - name: http
+        port: 80
+        protocol: TCP
+        targetPort: 8081
+
+    modelServers:
+      type: vllm
+      targetPorts:
+        - number: 8000
+      # Label selector that pairs this InferencePool with the model server pods.
+      # The modelservice subchart stamps these labels onto pod template metadata.
+      matchLabels:
+        llm-d.ai/guide: "precise-prefix-cache-routing"
+
+# ---------------------------------------------------------------------------
+# modelservice — vLLM model server (NVIDIA GPU, Qwen3-32B, TP=2)
+#
+# Default: 8 replicas × 2 GPUs = 16 H100s (canonical benchmark fleet).
+# For smaller fleets or smoke tests reduce replicaCount before installing.
+# ---------------------------------------------------------------------------
+modelservice:
+  replicaCount: 8
+
+  image:
+    repository: vllm/vllm-openai
+    tag: v0.19.1
+
+  model:
+    name: "Qwen/Qwen3-32B"
+
+  extraArgs:
+    - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
+    - "--tensor-parallel-size=2"
+    - "--block-size=64"          # must match precise-prefix-cache-producer blockSize above
+    - "--gpu-memory-utilization=0.95"
+    - "--kv-events-config"
+    # Each pod publishes KV-block events over its own ZMQ PUB socket.
+    # The router's pod-discovery subscribes per-pod so both router replicas
+    # maintain independent but converging indexes.
+    - '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"$(KV_EVENTS_ENDPOINT)","topic":"kv@$(POD_IP):$(POD_PORT)@Qwen/Qwen3-32B"}'
+
+  env:
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: llm-d-hf-token
+          key: HF_TOKEN
+    - name: POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+    # Matches the modelserver container port. Used in the kv-events topic so pods
+    # are identified by their inference endpoint (kv@<POD_IP>:<POD_PORT>@<model>).
+    - name: POD_PORT
+      value: "8000"
+    # vLLM PUBs bind per-pod on tcp://*:5556 so every router replica can dial
+    # each pod's ZMQ socket independently (required for active-active HA).
+    - name: KV_EVENTS_ENDPOINT
+      value: "tcp://*:5556"
+    # Disables vLLM usage telemetry — its writes to /.config fail under
+    # restricted SecurityContexts (e.g. OpenShift).
+    - name: DO_NOT_TRACK
+      value: "1"
+
+  extraPorts:
+    # Exposed so each router replica can subscribe to the per-pod ZMQ socket
+    # bound by vLLM (KV_EVENTS_ENDPOINT=tcp://*:5556).
+    - containerPort: 5556
+      name: kv-events
+      protocol: TCP
+
+  # Pod labels used by the InferencePool matchLabels selector above.
+  labels:
+    llm-d.ai/guide: "precise-prefix-cache-routing"
+    llm-d.ai/model: "Qwen3-32B"
+    llm-d.ai/accelerator-variant: "gpu"
+    llm-d.ai/accelerator-vendor: "nvidia"
+    llm-d.ai/role: "decode"
+
+  resources:
+    limits:
+      cpu: "16"
+      memory: "128Gi"
+      nvidia.com/gpu: "2"
+    requests:
+      cpu: "8"
+      memory: "96Gi"
+      nvidia.com/gpu: "2"
+
+  volumeMounts:
+    - mountPath: /dev/shm
+      name: shm
+    - mountPath: /.cache
+      name: torch-compile-cache
+    # vllm/vllm-openai's Triton/Inductor caches at /.triton — not writable
+    # under restricted SecurityContexts (e.g. OpenShift).
+    - mountPath: /.triton
+      name: triton-cache
+    - mountPath: /.config
+      name: vllm-config
+
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 20Gi
+    - name: torch-compile-cache
+      emptyDir: {}
+    - name: triton-cache
+      emptyDir: {}
+    - name: vllm-config
+      emptyDir: {}
+
+  probes:
+    startup:
+      initialDelaySeconds: 15
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 120   # 60 min total startup window for large model download
+    liveness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 3
