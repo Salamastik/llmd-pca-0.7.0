@@ -14,7 +14,7 @@ The guide was also renamed: `precise-prefix-cache-aware` → `precise-prefix-cac
 
 | v0.5.1 Chart | Registry | Version | Status in v0.7.0 |
 |---|---|---|---|
-| `llm-d-infra/llm-d-infra` | `https://llm-d-incubation.github.io/llm-d-infra/` | v1.3.6 | **Removed** — functionality absorbed into the router standalone chart |
+| `llm-d-infra/llm-d-infra` | `https://llm-d-incubation.github.io/llm-d-infra/` | v1.3.6 | **Removed entirely** — Gateway is now a plain Kustomize overlay; no chart needed |
 | `inferencepool` (GAIE upstream) | `oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool` | v1.3.1 | **Replaced** — now `llm-d-router-standalone-dev` from `oci://ghcr.io/llm-d/charts` |
 | `llm-d-modelservice/llm-d-modelservice` | `https://llm-d-incubation.github.io/llm-d-modelservice/` | v0.4.7 | **Deprecated** — replaced by Kustomize overlays (`guides/recipes/modelserver/`) |
 
@@ -187,3 +187,123 @@ helm install ${GUIDE_NAME} \
 9. **Update** GAIE CRDs: v1.3.1 → v1.5.0
 10. **Update** Istio: 1.28.1 → 1.29.2, switch from helmfile to `istioctl install`
 11. **Remove** `GAIE_RELEASE_NAME_POSTFIX` env var from model server
+
+---
+
+## 8. How to Create a Gateway in v0.7.0 (llm-d-infra is Gone)
+
+`llm-d-infra` **no longer exists** in any active deployment path. It had two jobs in v0.5.1:
+
+1. Install the gateway controller (e.g. Istio) — now done independently per-provider
+2. Create the `Gateway` Kubernetes resource — now a plain Kustomize overlay
+
+The only remaining reference in the repo is a stub (`docs/infra-providers/minikube/README.md`)
+with content "TBD" — confirming it is not used.
+
+### Step 1 — Install CRDs (once per cluster)
+
+```bash
+# Gateway API CRDs
+kubectl apply -k "https://github.com/kubernetes-sigs/gateway-api/config/crd?ref=v1.5.1"
+
+# GAIE (InferencePool / InferenceModel) CRDs
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.5.0/v1-manifests.yaml
+
+# Or use the helper script in the repo:
+bash guides/recipes/gateway/install-gateway-crds.sh
+```
+
+### Step 2 — Install the Gateway Controller
+
+Pick one provider. **AgentGateway is now the preferred choice** for new deployments:
+
+#### AgentGateway (preferred — v1.1.0)
+
+```bash
+helm upgrade --install agentgateway-crds \
+  oci://cr.agentgateway.dev/charts/agentgateway-crds \
+  --namespace agentgateway-system --create-namespace \
+  --version v1.1.0
+
+helm upgrade --install agentgateway \
+  oci://cr.agentgateway.dev/charts/agentgateway \
+  --namespace agentgateway-system --create-namespace \
+  --version v1.1.0 \
+  --set inferenceExtension.enabled=true
+```
+
+#### Istio (v1.29.2)
+
+```bash
+ISTIO_VERSION=1.29.2
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=${ISTIO_VERSION} sh -
+export PATH="$PWD/istio-${ISTIO_VERSION}/bin:$PATH"
+istioctl install -y \
+  --set values.pilot.env.ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true
+```
+
+> Note: Istio was installed via `helmfile` in v0.5.1 (chart version 1.28.1).  
+> In v0.7.0 the recommended method is `istioctl install` (no chart).
+
+#### GKE Gateway
+
+GKE's built-in Gateway controller — no install required, enabled by default in GKE clusters.
+
+#### kgateway
+
+**Deprecated** in v0.7.0 — will be removed in the next release.
+
+### Step 3 — Create the Gateway Resource (Kustomize)
+
+After the controller is running, apply the matching Kustomize overlay to create
+the `Gateway` resource in the guide namespace. No Helm chart involved.
+
+```bash
+export NAMESPACE="llm-d-precise-prefix-cache-routing"
+
+# AgentGateway (preferred)
+kubectl apply -k guides/recipes/gateway/agentgateway -n ${NAMESPACE}
+
+# AgentGateway on OpenShift
+kubectl apply -k guides/recipes/gateway/agentgateway-openshift -n ${NAMESPACE}
+
+# Istio
+kubectl apply -k guides/recipes/gateway/istio -n ${NAMESPACE}
+
+# GKE (L7 ILB)
+kubectl apply -k guides/recipes/gateway/gke-l7-rilb -n ${NAMESPACE}
+```
+
+Each overlay patches the base `Gateway` resource (`guides/recipes/gateway/base/gateway.yaml`)
+with the correct `gatewayClassName` for the provider.
+
+### Step 4 — Deploy the Router in Gateway Mode
+
+Use `llm-d-router-gateway-dev` instead of `llm-d-router-standalone-dev`, and add
+`features/httproute-flags.yaml` to create the `HTTPRoute`:
+
+```bash
+export GUIDE_NAME="precise-prefix-cache-routing"
+export NAMESPACE="llm-d-${GUIDE_NAME}"
+export ROUTER_CHART_VERSION=v0
+export PROVIDER_NAME=agentgateway   # or: istio | gke | none
+
+helm install ${GUIDE_NAME} \
+  oci://ghcr.io/llm-d/charts/llm-d-router-gateway-dev \
+  -f guides/recipes/router/base.values.yaml \
+  -f guides/recipes/router/features/httproute-flags.yaml \
+  -f guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml \
+  --set provider.name=${PROVIDER_NAME} \
+  -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
+```
+
+### Gateway Providers — Decision Matrix
+
+| Provider | Status | Install method | Chart |
+|---|---|---|---|
+| **Standalone** (Envoy sidecar) | **Default** — no Gateway needed | — | `llm-d-router-standalone-dev` |
+| **AgentGateway** v1.1.0 | **Preferred** for new deployments | Helm (`cr.agentgateway.dev`) | `llm-d-router-gateway-dev` |
+| **Istio** v1.29.2 | Supported | `istioctl install` (not helmfile) | `llm-d-router-gateway-dev` |
+| **GKE Gateway** | Supported | Built-in (no install) | `llm-d-router-gateway-dev` |
+| **kgateway** | **Deprecated** | — | — |
+| ~~llm-d-infra~~ | **Removed** | — | — |
