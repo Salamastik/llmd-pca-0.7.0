@@ -23,11 +23,15 @@ appVersion: "v0.7.0"
 #     helm show chart oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev --version v0
 #   Then replace the version field below with the returned semver (e.g. 0.1.0).
 #
-# IMPORTANT – model server:
-#   As of llm-d v0.7, there is no official Helm chart for the model server.
-#   The official deployment method is Kustomize (see ../modelserver/gpu/vllm/base/).
-#   The local `modelservice` subchart below is a Helm translation of that
-#   Kustomize overlay, provided for users who prefer a pure-Helm workflow.
+# IMPORTANT – model server chart:
+#   The official Helm chart is llm-d-incubation/llm-d-modelservice (v0.4.13).
+#   Source: https://github.com/llm-d-incubation/llm-d-modelservice
+#   Repo:   https://llm-d-incubation.github.io/llm-d-modelservice/
+#   Note:   marked "deprecated" as of v0.7 in favour of Kustomize, but it
+#           remains the only published Helm chart and continues to receive
+#           releases (v0.4.13 published 2026-06-05).
+#   The local charts/modelservice/ directory is kept as a lightweight
+#   alternative that mirrors only the fields needed by this guide.
 
 dependencies:
   # llm-d Router in Standalone Mode — deploys InferencePool CRD instance + EPP + Envoy sidecar.
@@ -41,9 +45,10 @@ dependencies:
     version: "0.1.0"   # <-- verify: helm show chart oci://ghcr.io/llm-d/charts/llm-d-router-standalone-dev --version v0
     repository: "oci://ghcr.io/llm-d/charts"
 
-  # vLLM model server — local Helm subchart.
-  # Translated from guides/precise-prefix-cache-routing/modelserver/gpu/vllm/base/
-  # (the official method is Kustomize; this subchart mirrors it for Helm workflows).
-  - name: modelservice
-    version: "0.1.0"
-    repository: "file://charts/modelservice"
+  # Official llm-d model server Helm chart.
+  # Latest: v0.4.13  |  https://llm-d-incubation.github.io/llm-d-modelservice/
+  # TGZ also available in official-charts/llm-d-modelservice-v0.4.13.tgz
+  - name: llm-d-modelservice
+    alias: modelservice
+    version: "v0.4.13"
+    repository: "https://llm-d-incubation.github.io/llm-d-modelservice/"
